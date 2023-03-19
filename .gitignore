@@ -120,3 +120,7 @@ venv.bak/
 benchmarks/
 outputs/
 data
+
+# dlkou
+ckpts/
+exps/

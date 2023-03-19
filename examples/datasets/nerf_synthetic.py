@@ -63,9 +63,14 @@ class SubjectLoader(torch.utils.data.Dataset):
         "materials",
         "mic",
         "ship",
+        # custom
+        "cloth",
+        "man5",
+        "elonkou",
+        "ek",
+        "dongliang",
     ]
 
-    WIDTH, HEIGHT = 800, 800
     NEAR, FAR = 2.0, 6.0
     OPENGL_CAMERA = True
 
@@ -80,8 +85,12 @@ class SubjectLoader(torch.utils.data.Dataset):
         far: float = None,
         batch_over_images: bool = True,
         device: torch.device = torch.device("cpu"),
+        WIDTH: int = 800,
+        HEIGHT: int = 800
     ):
         super().__init__()
+        self.WIDTH = WIDTH
+        self.HEIGHT = HEIGHT
         assert split in self.SPLITS, "%s" % split
         assert subject_id in self.SUBJECT_IDS, "%s" % subject_id
         assert color_bkgd_aug in ["white", "black", "random"]
@@ -123,7 +132,7 @@ class SubjectLoader(torch.utils.data.Dataset):
         self.images = self.images.to(device)
         self.camtoworlds = self.camtoworlds.to(device)
         self.K = self.K.to(device)
-        assert self.images.shape[1:3] == (self.HEIGHT, self.WIDTH)
+        # assert self.images.shape[1:3] == (self.HEIGHT, self.WIDTH)
 
     def __len__(self):
         return len(self.images)
@@ -133,6 +142,63 @@ class SubjectLoader(torch.utils.data.Dataset):
         data = self.fetch_data(index)
         data = self.preprocess(data)
         return data
+
+    def generate_data_from_pose(self, c2w):
+        """Fetch the data (it maybe cached for multiple batches)."""
+        num_rays = self.num_rays
+
+        if self.training:
+            x = torch.randint(0, self.WIDTH, size=(num_rays,), device=self.images.device)
+            y = torch.randint(0, self.HEIGHT, size=(num_rays,), device=self.images.device)
+        else:
+            x, y = torch.meshgrid(torch.arange(self.WIDTH, device=self.images.device), torch.arange(self.HEIGHT, device=self.images.device), indexing="xy",)
+            x = x.flatten()
+            y = y.flatten()
+
+        # generate rays
+        camera_dirs = F.pad(
+            torch.stack(
+                [
+                    (x - self.K[0, 2] + 0.5) / self.K[0, 0],
+                    (y - self.K[1, 2] + 0.5)
+                    / self.K[1, 1]
+                    * (-1.0 if self.OPENGL_CAMERA else 1.0),
+                ],
+                dim=-1,
+            ),
+            (0, 1),
+            value=(-1.0 if self.OPENGL_CAMERA else 1.0),
+        )  # [num_rays, 3]
+
+        # [n_cams, height, width, 3]
+        directions = (camera_dirs[:, None, :] * c2w[:, :3, :3]).sum(dim=-1)
+        origins = torch.broadcast_to(c2w[:, :3, -1], directions.shape)
+        viewdirs = directions / torch.linalg.norm(directions, dim=-1, keepdims=True)
+
+        if self.training:
+            origins = torch.reshape(origins, (num_rays, 3))
+            viewdirs = torch.reshape(viewdirs, (num_rays, 3))
+        else:
+            origins = torch.reshape(origins, (self.HEIGHT, self.WIDTH, 3))
+            viewdirs = torch.reshape(viewdirs, (self.HEIGHT, self.WIDTH, 3))
+
+        rays = Rays(origins=origins, viewdirs=viewdirs)  # [h, w, 3] or [num_rays, 3]
+
+        if self.training:
+            if self.color_bkgd_aug == "random":
+                color_bkgd = torch.rand(3, device=self.images.device)
+            elif self.color_bkgd_aug == "white":
+                color_bkgd = torch.ones(3, device=self.images.device)
+            elif self.color_bkgd_aug == "black":
+                color_bkgd = torch.zeros(3, device=self.images.device)
+        else:
+            # just use white during inference
+            color_bkgd = torch.ones(3, device=self.images.device)
+
+        return {
+            "rays": rays,  # [n_rays,] or [h, w]
+            "color_bkgd": color_bkgd,  # [3,]
+        }
 
     def preprocess(self, data):
         """Process the fetched / cached data with randomness."""
